@@ -2375,12 +2375,19 @@ def _claimer_id() -> str:
 # ---------------------------------------------------------------------------
 
 def _canonical_assignee(assignee: Optional[str]) -> Optional[str]:
-    """Lowercase-assignee normalization for Kanban rows (dashboard/CLI parity)."""
+    """Lowercase-assignee normalization for Kanban rows (dashboard/CLI parity).
+
+    Hard-coded mapping: "hermes" -> "default" so dispatcher workers never
+    see the reserved internal profile name (no routable gateway worker).
+    """
     if assignee is None:
         return None
     from hermes_cli.profiles import normalize_profile_name
 
-    return normalize_profile_name(assignee)
+    canon = normalize_profile_name(assignee)
+    if canon == "hermes":
+        return "default"
+    return canon
 
 
 def create_task(
