@@ -146,6 +146,23 @@ class ComputerUseBackend(ABC):
     def key(self, keys: str) -> ActionResult:
         """Send a key combo, e.g. 'cmd+s', 'ctrl+alt+t', 'return'."""
 
+    def paste_text(self, text: str) -> ActionResult:
+        """Enter text via the OS clipboard + paste hotkey (React/Electron-safe).
+
+        React/Electron controlled inputs (Claude, Slack, Discord, VS Code, …)
+        derive their value from input/onChange events. A clipboard paste fires
+        those events, so the text lands in the app's internal state — unlike
+        synthetic per-key `type_text` on some drivers, or AX `set_value`, which
+        set the field's displayed value without an input event and leave the
+        app's state empty (so a Send button reading that state submits nothing).
+
+        Concrete default: fall back to `type_text`. Backends that can drive the
+        OS clipboard and a paste hotkey should override this with the real path.
+        """
+        res = self.type_text(text)
+        return ActionResult(ok=res.ok, action="paste", message=res.message,
+                            capture=res.capture, meta=res.meta)
+
     # ── Introspection ───────────────────────────────────────────────
     @abstractmethod
     def list_apps(self) -> List[Dict[str, Any]]:

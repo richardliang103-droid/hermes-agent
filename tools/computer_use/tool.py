@@ -82,7 +82,7 @@ _SAFE_ACTIONS = frozenset({"capture", "wait", "list_apps"})
 # Actions that mutate user-visible state. Go through approval.
 _DESTRUCTIVE_ACTIONS = frozenset({
     "click", "double_click", "right_click", "middle_click",
-    "drag", "scroll", "type", "key", "set_value", "focus_app",
+    "drag", "scroll", "type", "paste", "key", "set_value", "focus_app",
 })
 
 # Hard-blocked key combinations. Mirrored from #4562 — these are destructive
@@ -246,7 +246,7 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
         return json.dumps({"error": "missing `action`"})
 
     # Safety: validate actions before approval prompt.
-    if action == "type":
+    if action in ("type", "paste"):
         text = args.get("text", "")
         pat = _is_blocked_type(text)
         if pat:
@@ -330,9 +330,9 @@ def _summarize_action(action: str, args: Dict[str, Any]) -> str:
         return f"drag {src} → {dst}"
     if action == "scroll":
         return f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}"
-    if action == "type":
+    if action in ("type", "paste"):
         text = args.get("text", "")
-        return f"type {text[:60]!r}" + ("..." if len(text) > 60 else "")
+        return f"{action} {text[:60]!r}" + ("..." if len(text) > 60 else "")
     if action == "key":
         return f"key {args.get('keys', '')!r}"
     if action == "focus_app":
@@ -418,6 +418,10 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
 
     if action == "type":
         res = backend.type_text(args.get("text", ""))
+        return _maybe_follow_capture(backend, res, capture_after)
+
+    if action == "paste":
+        res = backend.paste_text(args.get("text", ""))
         return _maybe_follow_capture(backend, res, capture_after)
 
     if action == "key":

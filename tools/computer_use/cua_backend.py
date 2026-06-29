@@ -101,6 +101,29 @@ _DESKTOP_WINDOW_NAMES = (
 )
 
 
+def _set_os_clipboard(text: str) -> None:
+    """Place ``text`` on the OS clipboard (used by the React-safe paste path).
+
+    Uses the platform's native clipboard CLI so the running cua-driver target
+    app reads the same system clipboard a real Cmd/Ctrl+V would.
+    """
+    if sys.platform == "darwin":
+        cmd = ["pbcopy"]
+    elif os.name == "nt":
+        cmd = ["clip"]
+    elif shutil.which("wl-copy"):
+        cmd = ["wl-copy"]
+    elif shutil.which("xclip"):
+        cmd = ["xclip", "-selection", "clipboard"]
+    elif shutil.which("xsel"):
+        cmd = ["xsel", "--clipboard", "--input"]
+    else:
+        raise RuntimeError(
+            "no clipboard tool found (need pbcopy/clip/wl-copy/xclip/xsel)"
+        )
+    subprocess.run(cmd, input=text.encode("utf-8"), check=True, timeout=10)
+
+
 # Env var cua-driver reads to gate its anonymous usage telemetry (PostHog).
 # Setting it to "0" disables telemetry; absence => the binary's own default
 # (telemetry ON upstream).
@@ -1377,6 +1400,29 @@ class CuaDriverBackend(ComputerUseBackend):
             return self._action("hotkey", {"pid": pid, "keys": modifiers + [key_name]})
         else:
             return self._action("press_key", {"pid": pid, "key": key_name})
+
+    def paste_text(self, text: str) -> ActionResult:
+        """React/Electron-safe text entry: OS clipboard + paste hotkey.
+
+        Pasting fires the input/onChange event that controlled inputs (Claude,
+        Slack, Discord, VS Code, …) need, so the text lands in the app's state —
+        unlike `type_text` (synthetic keys, which some drivers deliver in a way
+        React ignores) or `set_value` (AX value, no input event).
+        """
+        pid = self._active_pid
+        if pid is None:
+            return ActionResult(ok=False, action="paste",
+                                message="No active window — call capture() first.")
+        try:
+            _set_os_clipboard(text)
+        except Exception as e:
+            return ActionResult(ok=False, action="paste",
+                                message=f"clipboard set failed: {e}")
+        combo = "cmd+v" if sys.platform == "darwin" else "ctrl+v"
+        res = self.key(combo)
+        # Re-label so callers / telemetry record this as a paste, not a raw key.
+        return ActionResult(ok=res.ok, action="paste", message=res.message,
+                            capture=res.capture, meta=res.meta)
 
     # ── Value setter ────────────────────────────────────────────────
     def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:

@@ -40,6 +40,7 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                     "drag",
                     "scroll",
                     "type",
+                    "paste",
                     "key",
                     "set_value",
                     "wait",
@@ -51,7 +52,14 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
                     "effects). All other actions require approval unless "
                     "auto-approved. Use `set_value` for select/popup elements "
                     "and sliders — it selects the matching option directly "
-                    "without opening the native menu (no focus steal)."
+                    "without opening the native menu (no focus steal). "
+                    "To enter text into React/Electron apps (Claude, Slack, "
+                    "Discord, VS Code, Obsidian, most chat boxes) use `paste`, "
+                    "NOT `type`: `paste` puts the text on the clipboard and "
+                    "sends the paste hotkey, which fires the input/onChange "
+                    "event those apps rely on. Plain `type`/`set_value` can "
+                    "leave the field looking filled while the app's internal "
+                    "state stays empty, so the message never actually sends."
                 ),
             },
             # ── capture ────────────────────────────────────────────
@@ -179,7 +187,14 @@ COMPUTER_USE_SCHEMA: Dict[str, Any] = {
             # ── type / key / wait ──────────────────────────────────
             "text": {
                 "type": "string",
-                "description": "Text to type (respects the current layout).",
+                "description": (
+                    "Text for action='type' (synthetic keystrokes, respects "
+                    "the current layout) or action='paste' (clipboard + paste "
+                    "hotkey). Prefer 'paste' for React/Electron inputs "
+                    "(Claude, Slack, Discord, VS Code, Obsidian) where 'type' "
+                    "may look filled but not register; 'type' is fine for "
+                    "native fields and terminals."
+                ),
             },
             "keys": {
                 "type": "string",
