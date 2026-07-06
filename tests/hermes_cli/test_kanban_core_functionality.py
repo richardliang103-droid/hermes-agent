@@ -2785,6 +2785,7 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     def fake_popen(cmd, **kwargs):
         captured["cmd"] = cmd
         captured["env"] = kwargs.get("env", {})
+        captured["popen_kwargs"] = kwargs
         return FakeProc()
 
     monkeypatch.setattr("subprocess.Popen", fake_popen)
@@ -2817,6 +2818,9 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     env = captured["env"]
     assert env.get("HERMES_KANBAN_TASK") == tid
     assert env.get("HERMES_PROFILE") == "some-profile"
+    if kb.sys.platform == "darwin":
+        assert captured["popen_kwargs"]["start_new_session"] is False
+        assert captured["popen_kwargs"]["process_group"] == 0
 
 
 def test_default_spawn_raises_terminal_timeout_to_task_runtime(kanban_home, monkeypatch):

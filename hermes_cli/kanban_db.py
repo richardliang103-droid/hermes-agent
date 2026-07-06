@@ -7922,6 +7922,17 @@ def _default_spawn(
 
     # Use 'a' so a re-run on unblock appends rather than overwrites.
     log_f = open(log_path, "ab")
+    _session_kwargs: dict[str, Any]
+    if sys.platform == "darwin":
+        # On macOS, setsid()-style children spawned by the gateway have been
+        # observed losing outbound provider connectivity while the identical
+        # argv/env works from the parent Terminal. A fresh process group still
+        # isolates foreground Ctrl-C without creating a new login/session
+        # boundary. Reclaim logic signals the worker PID directly, so it does
+        # not depend on the child being a session leader.
+        _session_kwargs = {"start_new_session": False, "process_group": 0}
+    else:
+        _session_kwargs = {"start_new_session": True}
     try:
         proc = subprocess.Popen(  # noqa: S603 -- argv is a fixed list built above
             cmd,
@@ -7930,7 +7941,7 @@ def _default_spawn(
             stdout=log_f,
             stderr=subprocess.STDOUT,
             env=env,
-            start_new_session=True,
+            **_session_kwargs,
             creationflags=subprocess.CREATE_NO_WINDOW if _IS_WINDOWS else 0,
         )
     except FileNotFoundError:
