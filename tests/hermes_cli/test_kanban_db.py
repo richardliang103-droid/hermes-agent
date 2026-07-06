@@ -890,6 +890,25 @@ def test_classify_worker_exit_recognizes_rate_limit_sentinel(kanban_home):
     assert _kb._classify_worker_exit(pid + 1) == ("nonzero_exit", 1)
 
 
+def test_worker_failure_exit_code_covers_http_500_server_error(kanban_home):
+    """The original provider-wide HTTP 500 signature must be infra, not crash."""
+    import hermes_cli.kanban_db as _kb
+
+    assert (
+        _kb.kanban_worker_failure_exit_code("server_error")
+        == _kb.KANBAN_INFRA_EXIT_CODE
+    )
+    assert (
+        _kb.kanban_worker_failure_exit_code("overloaded")
+        == _kb.KANBAN_INFRA_EXIT_CODE
+    )
+    assert (
+        _kb.kanban_worker_failure_exit_code("rate_limit")
+        == _kb.KANBAN_RATE_LIMIT_EXIT_CODE
+    )
+    assert _kb.kanban_worker_failure_exit_code("model_not_found") == 1
+
+
 def test_infra_exit_requeues_without_counting_failure(kanban_home, monkeypatch):
     """Exhausted provider 5xx/timeout is infrastructure failure, not task failure."""
     import hermes_cli.kanban_db as _kb

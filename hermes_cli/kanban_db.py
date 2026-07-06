@@ -238,6 +238,20 @@ KANBAN_RATE_LIMIT_EXIT_CODE = 75
 KANBAN_INFRA_EXIT_CODE = 76
 
 
+def kanban_worker_failure_exit_code(failure_reason: Optional[str]) -> int:
+    """Map an exhausted API failure to the worker/dispatcher protocol.
+
+    Account quota failures and provider infrastructure failures are both
+    retryable without consuming the task failure budget, but use distinct
+    sentinels so task history remains truthful.
+    """
+    if failure_reason in {"rate_limit", "billing", "upstream_rate_limit"}:
+        return KANBAN_RATE_LIMIT_EXIT_CODE
+    if failure_reason in {"timeout", "overloaded", "server_error"}:
+        return KANBAN_INFRA_EXIT_CODE
+    return 1
+
+
 def _resolve_crash_grace_seconds() -> int:
     """Return the crash-detection grace period in seconds.
 
