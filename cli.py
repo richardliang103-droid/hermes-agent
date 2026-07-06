@@ -16078,14 +16078,21 @@ def main(
                         _exit_code = 0
                         if isinstance(result, dict) and result.get("failed"):
                             _exit_code = 1
-                            if os.environ.get("HERMES_KANBAN_TASK") and result.get(
-                                "failure_reason"
-                            ) in ("rate_limit", "billing"):
+                            _failure_reason = result.get("failure_reason")
+                            if os.environ.get("HERMES_KANBAN_TASK") and _failure_reason in (
+                                "rate_limit", "billing", "upstream_rate_limit",
+                                "timeout", "overloaded",
+                            ):
                                 try:
                                     from hermes_cli.kanban_db import (
+                                        KANBAN_INFRA_EXIT_CODE as _INFRA_CODE,
                                         KANBAN_RATE_LIMIT_EXIT_CODE as _RL_CODE,
                                     )
-                                    _exit_code = _RL_CODE
+                                    _exit_code = (
+                                        _INFRA_CODE
+                                        if _failure_reason in ("timeout", "overloaded")
+                                        else _RL_CODE
+                                    )
                                 except Exception:
                                     _exit_code = 1
                         sys.exit(_exit_code)

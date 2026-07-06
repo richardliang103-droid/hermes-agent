@@ -890,6 +890,35 @@ def test_classify_worker_exit_recognizes_rate_limit_sentinel(kanban_home):
     assert _kb._classify_worker_exit(pid + 1) == ("nonzero_exit", 1)
 
 
+def test_infra_exit_requeues_without_counting_failure(kanban_home, monkeypatch):
+    """Exhausted provider 5xx/timeout is infrastructure failure, not task failure."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    with kb.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(
+            conn, title="provider outage", assignee="a", max_retries=1
+        )
+        pid = 31339
+        kb.claim_task(conn, tid, claimer=f"{host}:infra")
+        conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid))
+        conn.commit()
+        _kb._record_worker_exit(pid, _exited_status(_kb.KANBAN_INFRA_EXIT_CODE))
+
+        assert tid not in kb.detect_crashed_workers(conn)
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        run = conn.execute(
+            "SELECT outcome FROM task_runs WHERE task_id=? ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        assert run["outcome"] == "infra_unavailable"
+        assert kb.check_respawn_guard(conn, tid) == "rate_limit_cooldown"
+
+
 def test_rate_limit_exit_requeues_without_counting_failure(
     kanban_home, monkeypatch,
 ):

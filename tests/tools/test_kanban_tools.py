@@ -2150,6 +2150,67 @@ def test_create_does_not_subscribe_in_cli_session(monkeypatch, worker_env):
     assert _list_subs_for_task(d["task_id"]) == []
 
 
+def test_background_child_inherits_worker_parent_subscription(monkeypatch, worker_env):
+    """A child created after gateway context is lost still inherits the
+    notification route of the kanban worker that created it."""
+    from hermes_cli import kanban_db as kb
+    from tools import kanban_tools as kt
+
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    conn = kb.connect()
+    try:
+        parent = kb.create_task(conn, title="parent", assignee="worker")
+        kb.add_notify_sub(
+            conn, task_id=parent, platform="discord", chat_id="channel-42",
+            notifier_profile="default",
+        )
+    finally:
+        conn.close()
+    monkeypatch.setenv("HERMES_KANBAN_TASK", parent)
+
+    out = json.loads(kt._handle_create({"title": "child", "assignee": "peer"}))
+    assert out["ok"] is True
+    assert out["subscribed"] is True
+    subs = _sub_index(_list_subs_for_task(out["task_id"]))
+    assert [(s["platform"], s["chat_id"]) for s in subs] == [
+        ("discord", "channel-42")
+    ]
+
+
+def test_background_root_uses_configured_default_notify(monkeypatch, worker_env):
+    """An unattached cron/orchestrator card uses the board-wide default route."""
+    from tools import kanban_tools as kt
+
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(
+        kt,
+        "load_config",
+        lambda: {
+            "kanban": {
+                "auto_subscribe_on_create": True,
+                "default_notify": {
+                    "platform": "discord",
+                    "chat_id": "default-channel",
+                    "user_id": "owner",
+                    "notifier_profile": "default",
+                },
+            }
+        },
+    )
+
+    out = json.loads(kt._handle_create({"title": "root", "assignee": "peer"}))
+    assert out["subscribed"] is True
+    subs = _sub_index(_list_subs_for_task(out["task_id"]))
+    assert [(s["platform"], s["chat_id"]) for s in subs] == [
+        ("discord", "default-channel")
+    ]
+
+
 def test_create_respects_auto_subscribe_on_create_false(monkeypatch, worker_env, tmp_path):
     """The config gate kanban.auto_subscribe_on_create=false must
     suppress auto-subscription even when the session has a delivery

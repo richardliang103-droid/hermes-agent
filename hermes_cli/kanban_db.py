@@ -232,6 +232,10 @@ DEFAULT_CRASH_GRACE_SECONDS = 30
 # conventional "temporary failure, retry later" code, and well clear of the
 # 0/1/2 codes the worker uses for success / generic failure / usage error.
 KANBAN_RATE_LIMIT_EXIT_CODE = 75
+# Provider-wide transport failures (timeouts, 5xx/overload after every
+# configured fallback is exhausted) are also temporary, but are kept distinct
+# from account quota/billing failures in task history and telemetry.
+KANBAN_INFRA_EXIT_CODE = 76
 
 
 def _resolve_crash_grace_seconds() -> int:
@@ -5745,6 +5749,9 @@ class DispatchResult:
     (EX_TEMPFAIL sentinel exit) and were released back to ``ready`` WITHOUT
     counting a failure. These never trip the circuit breaker — a long quota
     window just makes the task bounce cheaply until the window clears."""
+    infra_unavailable: list[str] = field(default_factory=list)
+    """Task ids requeued after every provider/fallback was unavailable.
+    Like quota requeues, these do not consume the task failure budget."""
     skipped_locked: bool = False
     """True when this tick was skipped because another process already held
     the board's dispatch lock (issue #35240). A losing dispatcher does no
@@ -5803,6 +5810,8 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
       provider rate-limited / exhausted quota, NOT because the task failed.
       ``detect_crashed_workers`` releases the task back to ``ready`` without
       counting a failure, so a long quota window can't trip the breaker.
+    * ``"infra_unavailable"`` — all providers/fallbacks were unavailable.
+      Requeue without consuming the task failure budget.
     * ``"nonzero_exit"`` — ``WIFEXITED`` with non-zero status. Real error.
     * ``"signaled"`` — ``WIFSIGNALED`` (OOM killer, SIGKILL, etc). Real crash.
     * ``"unknown"`` — pid was not in the reap registry (either reaped by
@@ -5824,6 +5833,8 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
                 return ("clean_exit", 0)
             if code == KANBAN_RATE_LIMIT_EXIT_CODE:
                 return ("rate_limited", code)
+            if code == KANBAN_INFRA_EXIT_CODE:
+                return ("infra_unavailable", code)
             return ("nonzero_exit", code)
         if os.WIFSIGNALED(raw):
             return ("signaled", os.WTERMSIG(raw))
@@ -6380,6 +6391,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     """
     crashed: list[str] = []
     rate_limited: list[str] = []
+    infra_unavailable: list[str] = []
     # Per-crash details collected inside the main txn, used after it
     # closes to run ``_record_task_failure`` (which needs its own
     # write_txn so can't nest). ``protocol_violation`` flags the
@@ -6412,6 +6424,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
             pid = int(row["worker_pid"])
             kind, code = _classify_worker_exit(pid)
             rate_limited_exit = False
+            infra_unavailable_exit = False
             if kind == "clean_exit":
                 # Worker subprocess returned 0 but its task is still
                 # ``running`` in the DB — it exited without calling
@@ -6448,6 +6461,19 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     "claimer": row["claim_lock"],
                     "exit_code": code,
                 }
+            elif kind == "infra_unavailable":
+                protocol_violation = False
+                infra_unavailable_exit = True
+                error_text = (
+                    f"pid {pid} exited after all providers were unavailable — "
+                    "requeued without counting a task failure"
+                )
+                event_kind = "infra_unavailable"
+                event_payload = {
+                    "pid": pid,
+                    "claimer": row["claim_lock"],
+                    "exit_code": code,
+                }
             else:
                 protocol_violation = False
                 if kind == "nonzero_exit":
@@ -6473,7 +6499,11 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 # Rate-limited requeues are a clean release, not a crash —
                 # record the run outcome as ``rate_limited`` so the board
                 # history doesn't show a phantom crash for a quota wall.
-                _run_outcome = "rate_limited" if rate_limited_exit else "crashed"
+                _run_outcome = (
+                    "rate_limited" if rate_limited_exit
+                    else "infra_unavailable" if infra_unavailable_exit
+                    else "crashed"
+                )
                 run_id = _end_run(
                     conn, row["id"],
                     outcome=_run_outcome, status=_run_outcome,
@@ -6485,7 +6515,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                     event_payload,
                     run_id=run_id,
                 )
-                if rate_limited_exit:
+                if rate_limited_exit or infra_unavailable_exit:
                     # Stamp the failure-error column so ``check_respawn_guard``
                     # recognizes this as a quota blocker and defers the
                     # respawn until the window clears — WITHOUT touching
@@ -6495,7 +6525,10 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                         "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                         (error_text[:500], row["id"]),
                     )
-                    rate_limited.append(row["id"])
+                    if rate_limited_exit:
+                        rate_limited.append(row["id"])
+                    else:
+                        infra_unavailable.append(row["id"])
                 else:
                     crashed.append(row["id"])
                     crash_details.append(
@@ -6544,6 +6577,7 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
     # Same side-channel for rate-limited requeues — these did NOT count a
     # failure and are NOT crashes, so they stay out of the ``crashed`` return.
     detect_crashed_workers._last_rate_limited = rate_limited  # type: ignore[attr-defined]
+    detect_crashed_workers._last_infra_unavailable = infra_unavailable  # type: ignore[attr-defined]
     return crashed
 
 
@@ -6836,7 +6870,7 @@ def check_respawn_guard(conn: sqlite3.Connection, task_id: str) -> Optional[str]
     ).fetchone()
     if (
         latest_run is not None
-        and latest_run["outcome"] == "rate_limited"
+        and latest_run["outcome"] in {"rate_limited", "infra_unavailable"}
     ):
         if rl_cooldown <= 0:
             # Cooldown disabled — respawn immediately, and skip the
@@ -7070,6 +7104,11 @@ def _dispatch_once_locked(
     )
     if _crash_rate_limited:
         result.rate_limited.extend(_crash_rate_limited)
+    _crash_infra_unavailable = getattr(
+        detect_crashed_workers, "_last_infra_unavailable", []
+    )
+    if _crash_infra_unavailable:
+        result.infra_unavailable.extend(_crash_infra_unavailable)
     result.timed_out = enforce_max_runtime(conn)
     result.promoted = recompute_ready(conn, failure_limit=failure_limit)
 

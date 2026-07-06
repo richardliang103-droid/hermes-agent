@@ -988,6 +988,7 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     We never want a notification bookkeeping failure to fail the
     kanban_create that the agent is mid-conversation about.
     """
+    cfg: Any = {}
     try:
         cfg = load_config()
         if not cfg_get(cfg, "kanban", "auto_subscribe_on_create", default=True):
@@ -1001,6 +1002,7 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
     chat_id = ""
     try:
         from gateway.session_context import get_session_env
+        from hermes_cli import kanban_db as _kb
         platform = get_session_env("HERMES_SESSION_PLATFORM", "")
         chat_id = get_session_env("HERMES_SESSION_CHAT_ID", "")
         if not platform or not chat_id:
@@ -1022,6 +1024,68 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
                 or os.environ.get("HERMES_SESSION_KEY", "")
             )
             if not session_key:
+                # Background workers commonly create child cards after their
+                # gateway ContextVars have been cleared.  Preserve the user's
+                # notification route by copying subscriptions from the
+                # running parent and/or explicit task-link parents.
+                source_ids: list[str] = []
+                worker_parent = os.environ.get("HERMES_KANBAN_TASK", "").strip()
+                if worker_parent:
+                    source_ids.append(worker_parent)
+                try:
+                    source_ids.extend(_kb.parent_ids(conn, task_id))
+                except Exception:
+                    pass
+                copied = 0
+                for source_id in dict.fromkeys(source_ids):
+                    for sub in _kb.list_notify_subs(conn, source_id):
+                        _kb.add_notify_sub(
+                            conn, task_id=task_id,
+                            platform=sub["platform"], chat_id=sub["chat_id"],
+                            thread_id=sub.get("thread_id"),
+                            user_id=sub.get("user_id"),
+                            notifier_profile=sub.get("notifier_profile"),
+                        )
+                        copied += 1
+                if copied:
+                    logger.info(
+                        "auto-subscribed background task %s from parent route(s): %s",
+                        task_id, ", ".join(dict.fromkeys(source_ids)),
+                    )
+                    return True
+                default_notify = cfg_get(
+                    cfg, "kanban", "default_notify", default={}
+                )
+                if isinstance(default_notify, dict):
+                    default_platform = str(
+                        default_notify.get("platform") or ""
+                    ).strip()
+                    default_chat_id = str(
+                        default_notify.get("chat_id") or ""
+                    ).strip()
+                    if default_platform and default_chat_id:
+                        _kb.add_notify_sub(
+                            conn, task_id=task_id,
+                            platform=default_platform,
+                            chat_id=default_chat_id,
+                            thread_id=default_notify.get("thread_id"),
+                            user_id=default_notify.get("user_id"),
+                            notifier_profile=(
+                                default_notify.get("notifier_profile")
+                                or os.environ.get("HERMES_PROFILE")
+                            ),
+                        )
+                        logger.info(
+                            "auto-subscribed background root task %s via "
+                            "kanban.default_notify (%s:%s)",
+                            task_id, default_platform, default_chat_id,
+                        )
+                        return True
+                logger.info(
+                    "auto-subscribe skipped for task %s: no persistent session "
+                    "channel or subscribed parent route",
+                    task_id,
+                )
                 return False  # CLI / cron / test — no persistent channel
             platform = "tui"
             chat_id = session_key
@@ -1032,8 +1096,6 @@ def _maybe_auto_subscribe(conn: Any, task_id: str) -> bool:
             or os.environ.get("HERMES_PROFILE")
         )
 
-        # Lazy-import to keep the module-level dependency light
-        from hermes_cli import kanban_db as _kb
         _kb.add_notify_sub(
             conn, task_id=task_id,
             platform=platform, chat_id=chat_id,

@@ -1402,6 +1402,10 @@ DEFAULT_CONFIG = {
         # behaviour — e.g. for a profile that prefers explicit
         # ``kanban_notify-subscribe`` calls per task.
         "auto_subscribe_on_create": True,
+        # Optional durable route for root/background cards that have neither
+        # gateway ContextVars nor a subscribed parent to inherit from.
+        # Example: {platform: discord, chat_id: "123", notifier_profile: default}
+        "default_notify": {},
     },
 
     # Anthropic prompt caching (Claude via OpenRouter or native Anthropic API).

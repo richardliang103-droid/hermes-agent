@@ -1303,8 +1303,38 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         # Determine api_mode from provider / base URL / model
         fb_api_mode = "chat_completions"
         fb_base_url = str(fb_client.base_url)
+        # Named providers declared in config.yaml carry their wire protocol
+        # under providers.<name>.transport.  The primary runtime resolver
+        # already honours it; fallback activation must do the same or a
+        # Messages-only provider is silently sent to /chat/completions.
+        try:
+            from hermes_cli.config import load_config as _load_config
+            _providers = (_load_config().get("providers", {}) or {})
+            _provider_cfg = _providers.get(fb_provider, {})
+            if isinstance(_provider_cfg, dict):
+                _declared_transport = str(
+                    _provider_cfg.get("transport")
+                    or _provider_cfg.get("api_mode")
+                    or ""
+                ).strip().lower()
+                _transport_modes = {
+                    "openai_chat": "chat_completions",
+                    "chat_completions": "chat_completions",
+                    "anthropic_messages": "anthropic_messages",
+                    "codex_responses": "codex_responses",
+                }
+                fb_api_mode = _transport_modes.get(
+                    _declared_transport, fb_api_mode
+                )
+        except Exception as _transport_exc:
+            logger.debug(
+                "Could not resolve configured transport for fallback %s: %s",
+                fb_provider, _transport_exc,
+            )
         _fb_is_azure = agent._is_azure_openai_url(fb_base_url)
-        if fb_provider == "openai-codex":
+        if fb_api_mode != "chat_completions":
+            pass  # explicit provider transport wins over URL/model heuristics
+        elif fb_provider == "openai-codex":
             fb_api_mode = "codex_responses"
         elif (
             fb_provider == "anthropic"

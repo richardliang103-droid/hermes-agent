@@ -103,6 +103,39 @@ class TestFallbackChainAdvancement:
             assert agent.model == "gpt-4o"
             assert agent._fallback_activated is True
 
+    def test_named_provider_honors_configured_anthropic_transport(self):
+        """Fallback transport must come from providers.<name>.transport.
+
+        This prevents Messages-only providers such as OpenModel from being
+        misrouted to the removed /v1/chat/completions endpoint.
+        """
+        agent = _make_agent(
+            fallback_model={"provider": "openmodel", "model": "deepseek-v4-flash"}
+        )
+        client = _mock_client("https://api.openmodel.ai/v1", "om-test")
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(client, "deepseek-v4-flash"),
+            ),
+            patch(
+                "hermes_cli.config.load_config",
+                return_value={
+                    "providers": {
+                        "openmodel": {"transport": "anthropic_messages"}
+                    }
+                },
+            ),
+            patch(
+                "agent.anthropic_adapter.build_anthropic_client",
+                return_value=MagicMock(),
+            ),
+        ):
+            assert agent._try_activate_fallback() is True
+
+        assert agent.api_mode == "anthropic_messages"
+        assert agent.client is None
+
     def test_second_fallback_works(self):
         fbs = [
             {"provider": "openai", "model": "gpt-4o"},
