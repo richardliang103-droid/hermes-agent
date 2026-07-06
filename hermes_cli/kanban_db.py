@@ -7903,6 +7903,11 @@ def _default_spawn(
         cmd.extend(["--toolsets", ",".join(worker_toolsets)])
     cmd.extend([
         "chat",
+        # Kanban workers are automation, so use the machine-readable quiet
+        # path. Unlike the human-facing `chat -q` branch, `-Q` propagates
+        # failed/partial results to a non-zero semantic exit code and writes
+        # the durable infra marker before exiting.
+        "-Q",
         "-q", prompt,
     ])
     # Redirect output to a per-task log under <board-root>/logs/.

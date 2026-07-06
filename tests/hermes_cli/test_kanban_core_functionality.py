@@ -2808,6 +2808,10 @@ def test_default_spawn_does_not_auto_load_any_skill(kanban_home, monkeypatch):
     assert cmd.index("--accept-hooks") < cmd.index("chat"), (
         f"--accept-hooks must come before 'chat' in argv: {cmd}"
     )
+    assert "-Q" in cmd, (
+        "kanban workers must use the machine-readable quiet path so API "
+        f"failures propagate semantic exit codes: {cmd}"
+    )
     # Assignee + task env are still present
     assert "some-profile" in cmd
     env = captured["env"]
