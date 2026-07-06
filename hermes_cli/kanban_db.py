@@ -252,6 +252,44 @@ def kanban_worker_failure_exit_code(failure_reason: Optional[str]) -> int:
     return 1
 
 
+def write_worker_exit_marker(
+    task_id: str, exit_code: int, *, board: Optional[str] = None,
+) -> None:
+    """Persist a worker's semantic exit when waitpid status may be unavailable."""
+    log_dir = worker_logs_dir(board=board)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    marker = log_dir / f".{task_id}.worker-exit.json"
+    tmp = marker.with_suffix(f".tmp-{os.getpid()}")
+    tmp.write_text(
+        json.dumps({
+            "task_id": task_id,
+            "pid": os.getpid(),
+            "exit_code": int(exit_code),
+            "created_at": time.time(),
+        }),
+        encoding="utf-8",
+    )
+    os.replace(tmp, marker)
+
+
+def _consume_worker_exit_marker(
+    task_id: str, pid: int, *, board: Optional[str] = None,
+) -> Optional[int]:
+    marker = worker_logs_dir(board=board) / f".{task_id}.worker-exit.json"
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+        if int(data.get("pid", -1)) != int(pid):
+            return None
+        age = time.time() - float(data.get("created_at", 0))
+        if age < 0 or age > _RECENT_WORKER_EXIT_TTL_SECONDS:
+            return None
+        code = int(data["exit_code"])
+        marker.unlink(missing_ok=True)
+        return code
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+
+
 def _resolve_crash_grace_seconds() -> int:
     """Return the crash-detection grace period in seconds.
 
@@ -5810,7 +5848,9 @@ def _record_worker_exit(pid: int, raw_status: int) -> None:
             _recent_worker_exits.pop(_pid, None)
 
 
-def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
+def _classify_worker_exit(
+    pid: int, *, task_id: Optional[str] = None, board: Optional[str] = None,
+) -> "tuple[str, Optional[int]]":
     """Classify a recently-reaped worker by pid.
 
     Returns ``(kind, code)`` where ``kind`` is one of:
@@ -5838,7 +5878,15 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
     """
     entry = _recent_worker_exits.get(int(pid))
     if entry is None:
-        return ("unknown", None)
+        marker_code = (
+            _consume_worker_exit_marker(task_id, pid, board=board)
+            if task_id else None
+        )
+        if marker_code == KANBAN_RATE_LIMIT_EXIT_CODE:
+            return ("rate_limited", marker_code)
+        if marker_code == KANBAN_INFRA_EXIT_CODE:
+            return ("infra_unavailable", marker_code)
+        return ("unknown", marker_code)
     raw, _ = entry
     try:
         if os.WIFEXITED(raw):
@@ -6436,7 +6484,9 @@ def detect_crashed_workers(conn: sqlite3.Connection) -> list[str]:
                 continue
 
             pid = int(row["worker_pid"])
-            kind, code = _classify_worker_exit(pid)
+            kind, code = _classify_worker_exit(
+                pid, task_id=row["id"], board=os.environ.get("HERMES_KANBAN_BOARD")
+            )
             rate_limited_exit = False
             infra_unavailable_exit = False
             if kind == "clean_exit":

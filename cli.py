@@ -16087,6 +16087,15 @@ def main(
                                     _exit_code = kanban_worker_failure_exit_code(
                                         _failure_reason
                                     )
+                                    if _exit_code in (75, 76):
+                                        from hermes_cli.kanban_db import (
+                                            write_worker_exit_marker,
+                                        )
+                                        write_worker_exit_marker(
+                                            os.environ["HERMES_KANBAN_TASK"],
+                                            _exit_code,
+                                            board=os.environ.get("HERMES_KANBAN_BOARD"),
+                                        )
                                 except Exception:
                                     _exit_code = 1
                         sys.exit(_exit_code)

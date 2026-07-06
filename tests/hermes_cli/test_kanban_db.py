@@ -909,6 +909,30 @@ def test_worker_failure_exit_code_covers_http_500_server_error(kanban_home):
     assert _kb.kanban_worker_failure_exit_code("model_not_found") == 1
 
 
+def test_durable_exit_marker_classifies_when_wait_status_is_missing(
+    kanban_home, monkeypatch,
+):
+    """Dispatcher can recover exit 76 even if another layer reaped the child."""
+    import hermes_cli.kanban_db as _kb
+
+    task_id = "t_marker"
+    pid = 424242
+    marker = _kb.worker_logs_dir() / f".{task_id}.worker-exit.json"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(_kb.json.dumps({
+        "task_id": task_id,
+        "pid": pid,
+        "exit_code": _kb.KANBAN_INFRA_EXIT_CODE,
+        "created_at": time.time(),
+    }))
+    _kb._recent_worker_exits.pop(pid, None)
+
+    assert _kb._classify_worker_exit(pid, task_id=task_id) == (
+        "infra_unavailable", _kb.KANBAN_INFRA_EXIT_CODE,
+    )
+    assert not marker.exists()
+
+
 def test_infra_exit_requeues_without_counting_failure(kanban_home, monkeypatch):
     """Exhausted provider 5xx/timeout is infrastructure failure, not task failure."""
     import hermes_cli.kanban_db as _kb
