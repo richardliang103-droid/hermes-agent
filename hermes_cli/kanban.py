@@ -1349,10 +1349,28 @@ def _cmd_create(args: argparse.Namespace) -> int:
             initial_status=getattr(args, "initial_status", "running"),
         )
         task = kb.get_task(conn, task_id)
+        # CLI/script-created cards must get the same notification treatment as
+        # cards created through the agent tool.  Import lazily to avoid pulling
+        # the tool registry into ordinary read-only kanban commands.
+        try:
+            from tools.kanban_tools import _maybe_auto_subscribe
+
+            subscribed = _maybe_auto_subscribe(conn, task_id)
+        except Exception as exc:
+            logger.info(
+                "kanban create auto-subscribe failed for %s: %s",
+                task_id, exc,
+            )
+            subscribed = False
     if getattr(args, "json", False):
-        print(json.dumps(_task_to_dict(task), indent=2, ensure_ascii=False))
+        payload = _task_to_dict(task)
+        payload["subscribed"] = subscribed
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
-        print(f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'})")
+        print(
+            f"Created {task_id}  ({task.status}, assignee={task.assignee or '-'}, "
+            f"subscribed={'yes' if subscribed else 'no'})"
+        )
 
         # Warn when the task would sit in `ready` because no dispatcher is
         # present. Only warn on ready+assigned tasks — triage/todo are

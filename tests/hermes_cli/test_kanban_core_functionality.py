@@ -3526,6 +3526,41 @@ def test_cli_create_silent_when_gateway_up(kanban_home, monkeypatch, capsys):
     assert "hermes gateway start" not in captured.err
 
 
+def test_cli_create_uses_default_notify_for_background_root(
+    kanban_home, monkeypatch, capsys,
+):
+    """Script/CLI cards must not bypass the default notification route."""
+    from hermes_cli import kanban as kb_cli
+
+    monkeypatch.delenv("HERMES_SESSION_PLATFORM", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_CHAT_ID", raising=False)
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.setattr(
+        "tools.kanban_tools.load_config",
+        lambda: {
+            "kanban": {
+                "auto_subscribe_on_create": True,
+                "default_notify": {
+                    "platform": "discord",
+                    "chat_id": "cli-default",
+                    "notifier_profile": "default",
+                },
+            }
+        },
+    )
+    ns = _make_create_ns(title="cli-background", assignee="worker", json=True)
+    assert kb_cli._cmd_create(ns) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["subscribed"] is True
+
+    with kb.connect() as conn:
+        subs = kb.list_notify_subs(conn, payload["id"])
+    assert [(s["platform"], s["chat_id"]) for s in subs] == [
+        ("discord", "cli-default")
+    ]
+
+
 def test_cli_create_no_warn_on_triage(kanban_home, monkeypatch, capsys):
     """Triage tasks can't be dispatched -> no warning."""
     from hermes_cli import kanban as kb_cli
