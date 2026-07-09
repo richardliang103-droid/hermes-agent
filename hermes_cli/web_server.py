@@ -1193,7 +1193,7 @@ def _count_status_active_sessions() -> int:
 
     db = SessionDB(read_only=True)
     try:
-        sessions = db.list_sessions_rich(limit=50)
+        sessions = db.list_sessions_rich(limit=50, compact_rows=True)
         now = time.time()
         return sum(
             1 for s in sessions
@@ -2174,7 +2174,6 @@ def _git_path(path: str) -> str:
 
 class GitPathBody(BaseModel):
     path: str
-
 
 class GitFileBody(BaseModel):
     path: str
@@ -3835,6 +3834,23 @@ async def get_action_status(name: str, lines: int = 200):
     }
 
 
+# Per-row fields that no session LIST consumer reads but that dominate the
+# payload. ``system_prompt`` is the fully rendered prompt — tens of KB per
+# row — and made a 21-row /api/sessions response 528KB (96% dead weight),
+# re-fetched by the desktop sidebar on every refresh. The desktop's
+# SessionInfo type doesn't declare either field and the web UI never touches
+# them; ``GET /api/sessions/{id}`` detail reads stay complete. List callers
+# that genuinely need the full rows can pass ``?full=1``.
+_SESSION_LIST_HEAVY_FIELDS = ("system_prompt", "model_config")
+
+
+def _strip_session_list_rows(sessions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    for s in sessions:
+        for key in _SESSION_LIST_HEAVY_FIELDS:
+            s.pop(key, None)
+    return sessions
+
+
 @app.get("/api/sessions")
 def get_sessions(
     limit: int = 20,
@@ -3845,6 +3861,7 @@ def get_sessions(
     source: str = None,
     exclude_sources: str = None,
     cwd_prefix: str = None,
+    full: bool = False,
     profile: Optional[str] = None,
 ):
     """List sessions.
@@ -3858,6 +3875,9 @@ def get_sessions(
     start time) or ``recent`` (by latest activity across the compression
     chain). ``recent`` keeps a long-running conversation on the first page
     after it auto-compresses into a fresh continuation id.
+
+    Rows omit ``system_prompt``/``model_config`` (the payload-dominating
+    fields no list UI reads) unless ``full=1`` is passed.
     """
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(
@@ -3893,6 +3913,10 @@ def get_sessions(
                 include_archived=include_archived,
                 archived_only=archived_only,
                 order_by_last_active=order == "recent",
+                # SQL-level projection: when the caller didn't ask for full
+                # rows, skip the system_prompt blob inside SQLite too (pairs
+                # with the API-level _strip_session_list_rows below).
+                compact_rows=not full,
             )
             total = db.session_count(
                 source=source or None,
@@ -3914,6 +3938,8 @@ def get_sessions(
                     s["is_default_profile"] = profile_name == "default"
                 # SQLite stores the flag as 0/1; expose a real JSON boolean.
                 s["archived"] = bool(s.get("archived"))
+            if not full:
+                _strip_session_list_rows(sessions)
             return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
         finally:
             db.close()
@@ -3934,6 +3960,7 @@ def get_profiles_sessions(
     profile: str = "all",
     source: str = None,
     exclude_sources: str = None,
+    full: bool = False,
 ):
     """Unified, read-only session list aggregated across ALL profiles.
 
@@ -3943,6 +3970,9 @@ def get_profiles_sessions(
     browsable list and only spins up a profile's backend when the user actually
     interacts (sends a message). A user with a single (default) profile gets the
     same rows as ``/api/sessions``, just tagged ``profile="default"``.
+
+    Rows omit ``system_prompt``/``model_config`` unless ``full=1`` — same
+    list projection as ``/api/sessions``.
     """
     if archived not in ("exclude", "only", "include"):
         raise HTTPException(status_code=400, detail="archived must be one of: exclude, only, include")
@@ -4005,6 +4035,8 @@ def get_profiles_sessions(
                 include_archived=include_archived,
                 archived_only=archived_only,
                 order_by_last_active=order == "recent",
+                # Same SQL-level blob skip as /api/sessions (see above).
+                compact_rows=not full,
             )
             profile_total = db.session_count(
                 source=source_filter,
@@ -4033,6 +4065,8 @@ def get_profiles_sessions(
     sort_key = "last_active" if order == "recent" else "started_at"
     merged.sort(key=lambda s: s.get(sort_key) or s.get("started_at") or 0, reverse=True)
     window = merged[offset:offset + limit]
+    if not full:
+        _strip_session_list_rows(window)
     return {
         "sessions": window,
         "total": total,
@@ -9053,6 +9087,54 @@ def _xai_device_poller(session_id: str) -> None:
             sess["error_message"] = str(e)
 
 
+def _http_response_error_detail(resp: Any) -> str:
+    """Best-effort extraction of a short provider error detail."""
+    try:
+        payload = resp.json()
+    except Exception:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            parts = [
+                str(error.get(key, "")).strip()
+                for key in ("message", "error_description", "code", "type")
+                if str(error.get(key, "")).strip()
+            ]
+            if parts:
+                return ": ".join(parts)
+        if isinstance(error, str) and error.strip():
+            return error.strip()
+        for key in ("detail", "message", "error_description"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    text = str(getattr(resp, "text", "") or "").strip()
+    return text[:500]
+
+
+def _codex_device_code_start_error(resp: Any) -> str:
+    """Dashboard-facing OpenAI Codex device-code start failure."""
+    status = getattr(resp, "status_code", "unknown")
+    detail = _http_response_error_detail(resp)
+    lower = detail.lower()
+    if "device" in lower and ("authori" in lower or "enable" in lower):
+        message = (
+            "OpenAI rejected the device-code login request. Your OpenAI "
+            "account may need device-code authorization enabled before Hermes "
+            "can start this dashboard login. Enable device-code authorization "
+            "in OpenAI, then return here and click Login again."
+        )
+    else:
+        message = (
+            "OpenAI rejected the device-code login request. Please try Login "
+            "again from the dashboard after checking your OpenAI account settings."
+        )
+    if detail:
+        return f"{message} (HTTP {status}: {detail})"
+    return f"{message} (HTTP {status})"
+
+
 def _codex_full_login_worker(session_id: str) -> None:
     """Run the complete OpenAI Codex device-code flow.
 
@@ -9085,7 +9167,7 @@ def _codex_full_login_worker(session_id: str) -> None:
                 headers={"Content-Type": "application/json"},
             )
         if resp.status_code != 200:
-            raise RuntimeError(f"deviceauth/usercode returned {resp.status_code}")
+            raise RuntimeError(_codex_device_code_start_error(resp))
         device_data = resp.json()
         user_code = device_data.get("user_code", "")
         device_auth_id = device_data.get("device_auth_id", "")
@@ -9328,7 +9410,7 @@ def _session_latest_descendant(session_id: str, db):
                 "started_at": row_get(row, "started_at", 2),
             })
     else:
-        rows = db.list_sessions_rich(limit=10000, offset=0)
+        rows = db.list_sessions_rich(limit=10000, offset=0, compact_rows=True)
 
     children = {}
     for row in rows:
@@ -9482,7 +9564,7 @@ async def get_session_stats(profile: Optional[str] = None):
         messages = db.message_count()
         by_source: Dict[str, int] = {}
         try:
-            for s in db.list_sessions_rich(limit=10000, include_archived=True):
+            for s in db.list_sessions_rich(limit=10000, include_archived=True, compact_rows=True):
                 src = str(s.get("source") or "cli")
                 by_source[src] = by_source.get(src, 0) + 1
         except Exception:
@@ -9549,15 +9631,30 @@ async def get_session_latest_descendant(
         db.close()
 
 @app.get("/api/sessions/{session_id}/messages")
-async def get_session_messages(session_id: str, profile: Optional[str] = None):
+async def get_session_messages(
+    session_id: str,
+    profile: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+):
     db = _open_session_db_for_profile(profile)
     try:
         sid = db.resolve_session_id(session_id)
         if not sid:
             raise HTTPException(status_code=404, detail="Session not found")
         sid = db.resolve_resume_session_id(sid)
-        messages = db.get_messages(sid)
-        return {"session_id": sid, "messages": messages}
+        # Clamp limit to prevent abuse (max 500 per page)
+        _limit = min(limit, 500) if limit is not None else None
+        messages = db.get_messages(sid, limit=_limit, offset=offset)
+        return {
+            "session_id": sid,
+            "messages": messages,
+            "pagination": {
+                "limit": _limit,
+                "offset": offset,
+                "returned": len(messages),
+            },
+        }
     finally:
         db.close()
 
@@ -10384,7 +10481,10 @@ async def cron_fire_webhook(request: Request):
     if not job_id:
         return JSONResponse({"error": "missing job_id"}, status_code=400)
 
-    profile = _find_cron_job_profile(job_id)
+    # _find_cron_job_profile walks every profile and lists its jobs (file
+    # I/O per profile) — run it off the event loop like the other cron
+    # dashboard endpoints.
+    profile = await _run_cron_dashboard_io(_find_cron_job_profile, job_id)
     if not profile:
         # Job is gone (cancelled / completed) — nothing to fire. 200 so NAS
         # does not retry a fire that is intentionally absent.
@@ -10459,7 +10559,11 @@ async def instantiate_blueprint(body: AutomationBlueprintInstantiate, profile: s
         # Blueprint-created jobs deliver to the dashboard's configured target by
         # default; the form's deliver slot overrides via spec["deliver"].
         spec.pop("origin", None)
-        return _call_cron_for_profile(profile, "create_job", **spec)
+        # create_job does per-profile file I/O — keep it off the event loop
+        # like the sibling cron endpoints (partial avoids **spec keys ever
+        # colliding with the wrapper's own parameters).
+        _create = functools.partial(_call_cron_for_profile, profile, "create_job", **spec)
+        return await _run_cron_dashboard_io(_create)
     except HTTPException:
         raise
     except Exception as e:
