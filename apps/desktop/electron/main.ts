@@ -65,6 +65,7 @@ import {
 } from './desktop-uninstall'
 import { installEmbedReferer } from './embed-referer'
 import { readDirForIpc } from './fs-read-dir'
+import { resolvePickerDefaultPath } from './wsl-path-bridge'
 import { probeGatewayWebSocket } from './gateway-ws-probe'
 import { scanGitRepos } from './git-repo-scan'
 import {
@@ -83,7 +84,7 @@ import {
   reviewUnstage
 } from './git-review-ops'
 import { gitRootForIpc } from './git-root'
-import { addWorktree, listBranches, listWorktrees, removeWorktree, switchBranch } from './git-worktree-ops'
+import { addWorktree, listBaseBranches, listBranches, listWorktrees, removeWorktree, switchBranch } from './git-worktree-ops'
 import {
   DATA_URL_READ_MAX_BYTES,
   DEFAULT_FETCH_TIMEOUT_MS,
@@ -8037,7 +8038,10 @@ ipcMain.handle('hermes:selectPaths', async (_event, options: any = {}) => {
 
   if (options?.defaultPath) {
     try {
-      resolvedDefaultPath = path.resolve(String(options.defaultPath))
+      // On a Windows host with a WSL backend the cwd may be a POSIX/WSL path;
+      // bridge it to a UNC/drive form the native dialog can actually open.
+      const bridged = IS_WINDOWS ? resolvePickerDefaultPath(String(options.defaultPath)) : String(options.defaultPath)
+      resolvedDefaultPath = bridged ? path.resolve(bridged) : undefined
     } catch {
       resolvedDefaultPath = undefined
     }
@@ -8522,6 +8526,10 @@ ipcMain.handle('hermes:git:branchSwitch', async (_event, repoPath, branch) =>
 )
 
 ipcMain.handle('hermes:git:branchList', async (_event, repoPath) => listBranches(repoPath, resolveGitBinary()))
+
+ipcMain.handle('hermes:git:baseBranchList', async (_event, repoPath) =>
+  listBaseBranches(repoPath, resolveGitBinary())
+)
 
 // Compact repo status (branch, ahead/behind, change counts + files) for the
 // composer coding rail. Returns null on a non-repo / remote backend so the rail
