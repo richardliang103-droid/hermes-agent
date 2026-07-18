@@ -276,9 +276,21 @@ class GatewayKanbanWatchersMixin:
                                     thread_id=sub.get("thread_id") or "",
                                     kinds=TERMINAL_KINDS,
                                 )
+                                task = _kb.get_task(conn, sub["task_id"])
+                                # Pipeline cards already have a stage-level retry
+                                # controller.  Keep the crash/timeout event in
+                                # SQLite for diagnostics, but consume it silently
+                                # while the card remains retryable; the final
+                                # completed/gave_up/blocked event is still sent.
+                                task_body = str(getattr(task, "body", "") or "") if task else ""
+                                managed_pipeline = "pipeline: argus-metis-hermes-themis" in task_body
+                                if managed_pipeline and task and task.status in {"ready", "running"}:
+                                    events = [
+                                        ev for ev in events
+                                        if ev.kind not in {"crashed", "timed_out"}
+                                    ]
                                 if not events:
                                     continue
-                                task = _kb.get_task(conn, sub["task_id"])
                                 logger.debug(
                                     "kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                                     len(events), sub["task_id"], slug, old_cursor, cursor,

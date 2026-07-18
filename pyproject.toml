@@ -138,6 +138,10 @@ dependencies = [
   # Hence the ``sys_platform == 'win32'`` marker: the dep (and its portalocker
   # / pywin32 tree) ships only where it's actually used.
   "concurrent-log-handler==0.9.29; sys_platform == 'win32'",
+  # yt-dlp is the deterministic media/metadata backend used by the bundled
+  # transcribe skill and its YouTube fallback. Keep it in the managed Hermes
+  # environment; a manual install was previously lost during venv rebuilds.
+  "yt-dlp==2026.7.4",
 ]
 
 [project.optional-dependencies]
